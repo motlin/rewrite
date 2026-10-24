@@ -69,6 +69,11 @@ public interface JavaParser extends Parser {
      */
     String SHARE_CLASSPATH_JAR_INDEX = "org.openrewrite.java.shareClasspathJarIndex";
 
+    /**
+     * System property giving the default of {@link Builder#shareClasspathTypes(boolean)}.
+     */
+    String SHARE_CLASSPATH_TYPES_PROPERTY = "org.openrewrite.java.shareClasspathTypes";
+
     static List<Path> runtimeClasspath() {
         return RuntimeClasspathCache.getRuntimeClasspath();
     }
@@ -255,6 +260,7 @@ public interface JavaParser extends Parser {
         protected Charset charset = Charset.defaultCharset();
         protected boolean logCompilationWarningsAndErrors = false;
         protected boolean typeAttribution = true;
+        protected boolean shareClasspathTypes = Boolean.getBoolean(SHARE_CLASSPATH_TYPES_PROPERTY);
         protected List<NamedStyles> styles = new ArrayList<>();
 
         public Builder() {
@@ -295,6 +301,18 @@ public interface JavaParser extends Parser {
          */
         public JavaTypeCache getTypeCache() {
             return javaTypeCache;
+        }
+
+        /**
+         * When true, types mapped from the classpath and the JDK are shared with every other parser in this JVM
+         * that has the same classpath and also shares, so they are mapped once per JVM instead of once per parser.
+         * Types declared by the parsed sources are never shared. Intended for test suites, which build a fresh
+         * parser for every test. Ignored when a {@link #typeFactory(JavaTypeFactory)} is configured, and after {@link JavaParser#setClasspath(Collection)}. Defaults to the {@value #SHARE_CLASSPATH_TYPES_PROPERTY} system property.
+         */
+        @Incubating(since = "8.94.0")
+        public B shareClasspathTypes(boolean shareClasspathTypes) {
+            this.shareClasspathTypes = shareClasspathTypes;
+            return (B) this;
         }
 
         public B typeFactory(@Nullable JavaTypeFactory javaTypeFactory) {
