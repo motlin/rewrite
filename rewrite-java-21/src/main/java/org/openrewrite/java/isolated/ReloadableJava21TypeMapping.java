@@ -188,7 +188,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
             // javac's invalid-Java name "<captured wildcard>".
             name = "?";
         } else {
-            name = type.tsym.name.toString();
+            name = signatureBuilder.name(type.tsym.name);
         }
         return typeFactory.computeGenericTypeVariable(signature, name, INVARIANT, gtv -> {
             if (type instanceof Type.CapturedType && !((Type.CapturedType) type).lower.hasTag(TypeTag.BOT)) {
@@ -222,7 +222,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
     private JavaType.FullyQualified classType(Type.ClassType classType, String signature) {
         Symbol.ClassSymbol sym = (Symbol.ClassSymbol) classType.tsym;
         Type.ClassType symType = (Type.ClassType) sym.type;
-        String fqn = sym.flatName().toString();
+        String fqn = signatureBuilder.name(sym.flatName());
 
         // Taken before the initializer may complete the symbol, matching the signature built from the same state.
         // A generic class arrives through its own symbol type only once javac has completed it, since javac
@@ -392,7 +392,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
         String signature = signatureBuilder.variableSignature(symbol);
         return typeFactory.variableFor(signature, () -> {
             JavaType.Variable variable = new JavaType.Variable(
-                    null, symbol.flags_field, symbol.name.toString(), null, null, null);
+                    null, symbol.flags_field, signatureBuilder.name(symbol.name), null, null, null);
             JavaType resolvedOwner = owner;
             if (owner == null) {
                 Type type = symbol.owner.type;
@@ -463,7 +463,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
             com.sun.tools.javac.util.List<Symbol.VarSymbol> params = methodSymbol.params();
             for (int i = 0; i < params.size(); i++) {
                 Symbol.VarSymbol p = params.get(i);
-                String s = p.name.toString();
+                String s = signatureBuilder.name(p.name);
                 paramNames[i] = s;
             }
         }
@@ -472,7 +472,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
         return typeFactory.methodFor(signature,
                 () -> new JavaType.Method(
                         null, methodSymbol.flags_field, null,
-                        methodSymbol.isConstructor() ? "<constructor>" : methodSymbol.getSimpleName().toString(),
+                        methodSymbol.isConstructor() ? "<constructor>" : signatureBuilder.name(methodSymbol.getSimpleName()),
                         null, finalParamNames, null, null, null, null, null),
                 method -> {
             JavaType returnType = null;
@@ -547,7 +547,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
             com.sun.tools.javac.util.List<Symbol.VarSymbol> params = methodSymbol.params();
             for (int i = 0; i < params.size(); i++) {
                 Symbol.VarSymbol p = params.get(i);
-                String s = p.name.toString();
+                String s = signatureBuilder.name(p.name);
                 paramNames[i] = s;
             }
         }
@@ -572,7 +572,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
                 if (declaredFormalTypeNames == null) {
                     declaredFormalTypeNames = new ArrayList<>();
                 }
-                declaredFormalTypeNames.add(typeParam.name.toString());
+                declaredFormalTypeNames.add(signatureBuilder.name(typeParam.name));
             }
         }
 
@@ -582,7 +582,7 @@ class ReloadableJava21TypeMapping implements JavaTypeMapping<Tree> {
         return typeFactory.methodFor(signature,
                 () -> new JavaType.Method(
                         null, methodSymbol.flags_field, null,
-                        methodSymbol.isConstructor() ? "<constructor>" : methodSymbol.getSimpleName().toString(),
+                        methodSymbol.isConstructor() ? "<constructor>" : signatureBuilder.name(methodSymbol.getSimpleName()),
                         null, finalParamNames, null, null, null, finalDefaultValues, finalFormalTypeNames),
                 method -> {
             Type signatureType = methodSymbol.type instanceof Type.ForAll ?
