@@ -63,6 +63,15 @@ public interface JavaType {
     }
 
     /**
+     * Marks this instance as shared by the trees of many parses. From then on an {@code unsafeSet} that would change
+     * it returns a changed copy and leaves this instance as it is, and one that would not change it returns this
+     * instance. Callers of {@code unsafeSet} must therefore use its result.
+     */
+    @Incubating(since = "8.94.0")
+    default void freeze() {
+    }
+
+    /**
      * Return a JavaType for the specified string.
      * The string is expected to be either a primitive type like "int" or a fully-qualified-class name like "java.lang.String"
      */
@@ -142,6 +151,14 @@ public interface JavaType {
 
         private JavaType @Nullable [] throwableTypes;
 
+        @JsonIgnore
+        private transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public List<JavaType> getThrowableTypes() {
             if (throwableTypes == null) {
                 return emptyList();
@@ -158,12 +175,18 @@ public interface JavaType {
         }
 
         public MultiCatch unsafeSet(@Nullable List<JavaType> throwableTypes) {
-            this.throwableTypes = arrayOrNullIfEmpty(throwableTypes, EMPTY_JAVA_TYPE_ARRAY);
-            return this;
+            return set(arrayOrNullIfEmpty(throwableTypes, EMPTY_JAVA_TYPE_ARRAY));
         }
 
         public MultiCatch unsafeSet(JavaType[] throwableTypes) {
-            this.throwableTypes = ListUtils.nullIfEmpty(throwableTypes);
+            return set(ListUtils.nullIfEmpty(throwableTypes));
+        }
+
+        private MultiCatch set(JavaType @Nullable [] throwableTypes) {
+            if (frozen) {
+                return SameElements.of(throwableTypes, this.throwableTypes) ? this : new MultiCatch(throwableTypes);
+            }
+            this.throwableTypes = throwableTypes;
             return this;
         }
 
@@ -188,6 +211,14 @@ public interface JavaType {
 
         private JavaType @Nullable [] bounds;
 
+        @JsonIgnore
+        private transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public List<JavaType> getBounds() {
             if (bounds == null) {
                 return emptyList();
@@ -204,12 +235,18 @@ public interface JavaType {
         }
 
         public Intersection unsafeSet(@Nullable List<JavaType> bounds) {
-            this.bounds = arrayOrNullIfEmpty(bounds, EMPTY_JAVA_TYPE_ARRAY);
-            return this;
+            return set(arrayOrNullIfEmpty(bounds, EMPTY_JAVA_TYPE_ARRAY));
         }
 
         public Intersection unsafeSet(JavaType[] bounds) {
-            this.bounds = ListUtils.nullIfEmpty(bounds);
+            return set(ListUtils.nullIfEmpty(bounds));
+        }
+
+        private Intersection set(JavaType @Nullable [] bounds) {
+            if (frozen) {
+                return SameElements.of(bounds, this.bounds) ? this : new Intersection(bounds);
+            }
+            this.bounds = bounds;
             return this;
         }
 
@@ -528,6 +565,26 @@ public interface JavaType {
         @NonFinal
         Method @Nullable [] methods;
 
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Class(@Nullable Integer managedReference, long flagsBitMap, String fullyQualifiedName,
+                      Kind kind, JavaType @Nullable [] typeParameters, @Nullable FullyQualified supertype, @Nullable FullyQualified owningClass,
+                      FullyQualified @Nullable [] annotations, FullyQualified @Nullable [] interfaces,
+                      Variable @Nullable [] members, Method @Nullable [] methods, boolean frozen) {
+            this(managedReference, flagsBitMap, fullyQualifiedName, kind, typeParameters, supertype, owningClass,
+                    annotations, interfaces, members, methods);
+        }
+
         @Override
         public List<Method> getMethods() {
             return methods == null ? emptyList() : Arrays.asList(methods);
@@ -588,46 +645,68 @@ public interface JavaType {
         public Class unsafeSet(@Nullable List<JavaType> typeParameters, @Nullable FullyQualified supertype, @Nullable FullyQualified owningClass,
                                @Nullable List<FullyQualified> annotations, @Nullable List<FullyQualified> interfaces,
                                @Nullable List<Variable> members, @Nullable List<Method> methods) {
-            //noinspection DuplicatedCode
-            this.typeParameters = arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY);
-            this.supertype = supertype;
-            this.owningClass = owningClass;
-            this.annotations = arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY);
-            this.interfaces = arrayOrNullIfEmpty(interfaces, EMPTY_FULLY_QUALIFIED_ARRAY);
-            this.members = arrayOrNullIfEmpty(members, EMPTY_VARIABLE_ARRAY);
-            this.methods = arrayOrNullIfEmpty(methods, EMPTY_METHOD_ARRAY);
-            return this;
+            return set(flagsBitMap, kind, fullyQualifiedName,
+                    arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY),
+                    supertype,
+                    owningClass,
+                    arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY),
+                    arrayOrNullIfEmpty(interfaces, EMPTY_FULLY_QUALIFIED_ARRAY),
+                    arrayOrNullIfEmpty(members, EMPTY_VARIABLE_ARRAY),
+                    arrayOrNullIfEmpty(methods, EMPTY_METHOD_ARRAY));
         }
 
         public Class unsafeSet(JavaType @Nullable [] typeParameters, @Nullable FullyQualified supertype, @Nullable FullyQualified owningClass,
                                FullyQualified @Nullable [] annotations, FullyQualified @Nullable [] interfaces,
                                Variable @Nullable [] members, Method @Nullable [] methods) {
-            //noinspection DuplicatedCode
-            this.typeParameters = ListUtils.nullIfEmpty(typeParameters);
-            this.supertype = supertype;
-            this.owningClass = owningClass;
-            this.annotations = ListUtils.nullIfEmpty(annotations);
-            this.interfaces = ListUtils.nullIfEmpty(interfaces);
-            this.members = ListUtils.nullIfEmpty(members);
-            this.methods = ListUtils.nullIfEmpty(methods);
-            return this;
+            return set(flagsBitMap, kind, fullyQualifiedName,
+                    ListUtils.nullIfEmpty(typeParameters),
+                    supertype,
+                    owningClass,
+                    ListUtils.nullIfEmpty(annotations),
+                    ListUtils.nullIfEmpty(interfaces),
+                    ListUtils.nullIfEmpty(members),
+                    ListUtils.nullIfEmpty(methods));
         }
 
         public Class unsafeSet(long flags, Kind kind, String fullyQualifiedName, @Nullable List<JavaType> typeParameters,
                                @Nullable FullyQualified supertype, @Nullable FullyQualified owningClass,
                                @Nullable List<FullyQualified> annotations, @Nullable List<FullyQualified> interfaces,
                                @Nullable List<Variable> members, @Nullable List<Method> methods) {
-            //noinspection DuplicatedCode
+            return set(flags, kind, fullyQualifiedName,
+                    arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY),
+                    supertype,
+                    owningClass,
+                    arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY),
+                    arrayOrNullIfEmpty(interfaces, EMPTY_FULLY_QUALIFIED_ARRAY),
+                    arrayOrNullIfEmpty(members, EMPTY_VARIABLE_ARRAY),
+                    arrayOrNullIfEmpty(methods, EMPTY_METHOD_ARRAY));
+        }
+
+        private Class set(long flags, Kind kind, String fullyQualifiedName, JavaType @Nullable [] typeParameters,
+                          @Nullable FullyQualified supertype, @Nullable FullyQualified owningClass,
+                          FullyQualified @Nullable [] annotations, FullyQualified @Nullable [] interfaces,
+                          Variable @Nullable [] members, Method @Nullable [] methods) {
+            if (frozen) {
+                if (flags == this.flagsBitMap && kind == this.kind && fullyQualifiedName.equals(this.fullyQualifiedName) &&
+                    SameElements.of(typeParameters, this.typeParameters) && supertype == this.supertype &&
+                    owningClass == this.owningClass && SameElements.of(annotations, this.annotations) &&
+                    SameElements.of(interfaces, this.interfaces) && SameElements.of(members, this.members) &&
+                    SameElements.of(methods, this.methods)) {
+                    return this;
+                }
+                return new Class(managedReference, flags, fullyQualifiedName, kind, typeParameters, supertype,
+                        owningClass, annotations, interfaces, members, methods);
+            }
             this.kind = kind;
             this.flagsBitMap = flags;
             this.fullyQualifiedName = fullyQualifiedName;
-            this.typeParameters = arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY);
+            this.typeParameters = typeParameters;
             this.supertype = supertype;
             this.owningClass = owningClass;
-            this.annotations = arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY);
-            this.interfaces = arrayOrNullIfEmpty(interfaces, EMPTY_FULLY_QUALIFIED_ARRAY);
-            this.members = arrayOrNullIfEmpty(members, EMPTY_VARIABLE_ARRAY);
-            this.methods = arrayOrNullIfEmpty(methods, EMPTY_METHOD_ARRAY);
+            this.annotations = annotations;
+            this.interfaces = interfaces;
+            this.members = members;
+            this.methods = methods;
             return this;
         }
 
@@ -699,6 +778,14 @@ public interface JavaType {
 
         ElementValue @Nullable [] values;
 
+        @JsonIgnore
+        private transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public Annotation(FullyQualified type, List<ElementValue> values) {
             this(type, arrayOrNullIfEmpty(values, EMPTY_ANNOTATION_VALUE_ARRAY));
         }
@@ -707,6 +794,13 @@ public interface JavaType {
         Annotation(FullyQualified type, ElementValue @Nullable [] values) {
             this.type = type;
             this.values = nullIfEmpty(values);
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Annotation(FullyQualified type, ElementValue @Nullable [] values, boolean frozen) {
+            this(type, values);
         }
 
         public List<ElementValue> getValues() {
@@ -845,6 +939,9 @@ public interface JavaType {
         }
 
         public JavaType.Annotation unsafeSet(FullyQualified type, ElementValue @Nullable [] values) {
+            if (frozen) {
+                return type == this.type && SameElements.of(values, this.values) ? this : new Annotation(type, values);
+            }
             this.type = type;
             this.values = values;
             return this;
@@ -872,6 +969,15 @@ public interface JavaType {
         @NonFinal
         JavaType @Nullable [] typeParameters;
 
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public Parameterized(@Nullable Integer managedReference, @Nullable FullyQualified type,
                              @Nullable List<JavaType> typeParameters) {
             this(
@@ -886,6 +992,14 @@ public interface JavaType {
             this.managedReference = managedReference;
             this.type = unknownIfNull(type);
             this.typeParameters = nullIfEmpty(typeParameters);
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Parameterized(@Nullable Integer managedReference, @Nullable FullyQualified type,
+                              JavaType @Nullable [] typeParameters, boolean frozen) {
+            this(managedReference, type, typeParameters);
         }
 
         @JsonCreator
@@ -916,16 +1030,22 @@ public interface JavaType {
         }
 
         public Parameterized unsafeSet(@Nullable FullyQualified type, @Nullable List<JavaType> typeParameters) {
-            assert type != this;
-            this.type = unknownIfNull(type);
-            this.typeParameters = arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY);
-            return this;
+            return set(type, arrayOrNullIfEmpty(typeParameters, EMPTY_JAVA_TYPE_ARRAY));
         }
 
         public Parameterized unsafeSet(@Nullable FullyQualified type, JavaType @Nullable [] typeParameters) {
+            return set(type, ListUtils.nullIfEmpty(typeParameters));
+        }
+
+        private Parameterized set(@Nullable FullyQualified type, JavaType @Nullable [] typeParameters) {
             assert type != this;
-            this.type = unknownIfNull(type);
-            this.typeParameters = ListUtils.nullIfEmpty(typeParameters);
+            FullyQualified t = unknownIfNull(type);
+            if (frozen) {
+                return t == this.type && SameElements.of(typeParameters, this.typeParameters) ? this :
+                        new Parameterized(managedReference, t, typeParameters);
+            }
+            this.type = t;
+            this.typeParameters = typeParameters;
             return this;
         }
 
@@ -1025,6 +1145,15 @@ public interface JavaType {
         @NonFinal
         JavaType @Nullable [] bounds;
 
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public GenericTypeVariable(@Nullable Integer managedReference, String name, Variance variance, @Nullable List<JavaType> bounds) {
             this(
                     managedReference,
@@ -1039,6 +1168,14 @@ public interface JavaType {
             this.name = name;
             this.variance = variance;
             this.bounds = nullIfEmpty(bounds);
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private GenericTypeVariable(@Nullable Integer managedReference, String name, Variance variance,
+                                    JavaType @Nullable [] bounds, boolean frozen) {
+            this(managedReference, name, variance, bounds);
         }
 
         @JsonCreator
@@ -1064,16 +1201,21 @@ public interface JavaType {
         }
 
         public GenericTypeVariable unsafeSet(String name, Variance variance, @Nullable List<JavaType> bounds) {
-            this.name = name;
-            this.variance = variance;
-            this.bounds = arrayOrNullIfEmpty(bounds, EMPTY_JAVA_TYPE_ARRAY);
-            return this;
+            return set(name, variance, arrayOrNullIfEmpty(bounds, EMPTY_JAVA_TYPE_ARRAY));
         }
 
         public GenericTypeVariable unsafeSet(String name, Variance variance, JavaType @Nullable [] bounds) {
+            return set(name, variance, ListUtils.nullIfEmpty(bounds));
+        }
+
+        private GenericTypeVariable set(String name, Variance variance, JavaType @Nullable [] bounds) {
+            if (frozen) {
+                return name.equals(this.name) && variance == this.variance && SameElements.of(bounds, this.bounds) ? this :
+                        new GenericTypeVariable(managedReference, name, variance, bounds);
+            }
             this.name = name;
             this.variance = variance;
-            this.bounds = ListUtils.nullIfEmpty(bounds);
+            this.bounds = bounds;
             return this;
         }
 
@@ -1116,10 +1258,28 @@ public interface JavaType {
         @NonFinal
         FullyQualified @Nullable [] annotations;
 
+        @With(AccessLevel.NONE)
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public Array(@Nullable Integer managedReference, @Nullable JavaType elemType, FullyQualified @Nullable [] annotations) {
             this.managedReference = managedReference;
             this.elemType = unknownIfNull(elemType);
             this.annotations = ListUtils.nullIfEmpty(annotations);
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Array(@Nullable Integer managedReference, @Nullable JavaType elemType, FullyQualified @Nullable [] annotations,
+                      boolean frozen) {
+            this(managedReference, elemType, annotations);
         }
 
         @JsonCreator
@@ -1149,8 +1309,13 @@ public interface JavaType {
         }
 
         public Array unsafeSet(JavaType elemType, FullyQualified @Nullable [] annotations) {
-            this.elemType = unknownIfNull(elemType);
-            this.annotations = ListUtils.nullIfEmpty(annotations);
+            JavaType e = unknownIfNull(elemType);
+            FullyQualified[] a = ListUtils.nullIfEmpty(annotations);
+            if (frozen) {
+                return e == this.elemType && SameElements.of(a, this.annotations) ? this : new Array(managedReference, e, a);
+            }
+            this.elemType = e;
+            this.annotations = a;
             return this;
         }
 
@@ -1380,6 +1545,16 @@ public interface JavaType {
         @NonFinal
         String @Nullable [] declaredFormalTypeNames;
 
+        @Getter(AccessLevel.NONE)
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public Method(@Nullable Integer managedReference, long flagsBitMap, @Nullable FullyQualified declaringType, String name,
                       @Nullable JavaType returnType, @Nullable List<String> parameterNames,
                       @Nullable List<JavaType> parameterTypes, @Nullable List<JavaType> thrownExceptions,
@@ -1418,6 +1593,18 @@ public interface JavaType {
             this.declaredFormalTypeNames = nullIfEmpty(declaredFormalTypeNames);
         }
 
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Method(@Nullable Integer managedReference, long flagsBitMap, @Nullable FullyQualified declaringType, String name,
+                       @Nullable JavaType returnType, String @Nullable [] parameterNames,
+                       JavaType @Nullable [] parameterTypes, JavaType @Nullable [] thrownExceptions,
+                       FullyQualified @Nullable [] annotations, @Nullable List<String> defaultValue,
+                       String @Nullable [] declaredFormalTypeNames, boolean frozen) {
+            this(managedReference, flagsBitMap, declaringType, name, returnType, parameterNames, parameterTypes,
+                    thrownExceptions, annotations, defaultValue, declaredFormalTypeNames);
+        }
+
         @JsonCreator
         Method() {
         }
@@ -1433,12 +1620,11 @@ public interface JavaType {
                                 @Nullable List<JavaType> parameterTypes,
                                 @Nullable List<JavaType> thrownExceptions,
                                 @Nullable List<FullyQualified> annotations) {
-            this.declaringType = unknownIfNull(declaringType);
-            this.returnType = unknownIfNull(returnType);
-            this.parameterTypes = arrayOrNullIfEmpty(parameterTypes, EMPTY_JAVA_TYPE_ARRAY);
-            this.thrownExceptions = arrayOrNullIfEmpty(thrownExceptions, EMPTY_JAVA_TYPE_ARRAY);
-            this.annotations = arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY);
-            return this;
+            return set(name, flagsBitMap, declaringType, returnType, parameterNames,
+                    arrayOrNullIfEmpty(parameterTypes, EMPTY_JAVA_TYPE_ARRAY),
+                    arrayOrNullIfEmpty(thrownExceptions, EMPTY_JAVA_TYPE_ARRAY),
+                    arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY),
+                    defaultValue, declaredFormalTypeNames);
         }
 
         public Method unsafeSet(@Nullable FullyQualified declaringType,
@@ -1446,13 +1632,11 @@ public interface JavaType {
                                 JavaType @Nullable [] parameterTypes,
                                 JavaType @Nullable [] thrownExceptions,
                                 FullyQualified @Nullable [] annotations) {
-            this.declaringType = unknownIfNull(declaringType);
-            this.returnType = unknownIfNull(returnType);
-            this.parameterTypes = ListUtils.nullIfEmpty(parameterTypes);
-            this.thrownExceptions = ListUtils.nullIfEmpty(thrownExceptions);
-            this.annotations = ListUtils.nullIfEmpty(annotations);
-            this.declaredFormalTypeNames = ListUtils.nullIfEmpty(declaredFormalTypeNames);
-            return this;
+            return set(name, flagsBitMap, declaringType, returnType, parameterNames,
+                    ListUtils.nullIfEmpty(parameterTypes),
+                    ListUtils.nullIfEmpty(thrownExceptions),
+                    ListUtils.nullIfEmpty(annotations),
+                    defaultValue, ListUtils.nullIfEmpty(declaredFormalTypeNames));
         }
 
         public Method unsafeSet(String name, long flagsBitMap,
@@ -1464,16 +1648,46 @@ public interface JavaType {
                                 FullyQualified @Nullable [] annotations,
                                 @Nullable List<String> defaultValue,
                                 String @Nullable [] declaredFormalTypeNames) {
+            return set(name, flagsBitMap, declaringType, returnType, parameterNames,
+                    ListUtils.nullIfEmpty(parameterTypes),
+                    ListUtils.nullIfEmpty(thrownExceptions),
+                    ListUtils.nullIfEmpty(annotations),
+                    defaultValue, ListUtils.nullIfEmpty(declaredFormalTypeNames));
+        }
+
+        private Method set(String name, long flagsBitMap,
+                           @Nullable FullyQualified declaringType,
+                           @Nullable JavaType returnType,
+                           String @Nullable [] parameterNames,
+                           JavaType @Nullable [] parameterTypes,
+                           JavaType @Nullable [] thrownExceptions,
+                           FullyQualified @Nullable [] annotations,
+                           @Nullable List<String> defaultValue,
+                           String @Nullable [] declaredFormalTypeNames) {
+            FullyQualified d = unknownIfNull(declaringType);
+            JavaType r = unknownIfNull(returnType);
+            if (frozen) {
+                if (name.equals(this.name) && flagsBitMap == this.flagsBitMap && d == this.declaringType &&
+                    r == this.returnType && Arrays.equals(parameterNames, this.parameterNames) &&
+                    SameElements.of(parameterTypes, this.parameterTypes) &&
+                    SameElements.of(thrownExceptions, this.thrownExceptions) &&
+                    SameElements.of(annotations, this.annotations) && Objects.equals(defaultValue, this.defaultValue) &&
+                    Arrays.equals(declaredFormalTypeNames, this.declaredFormalTypeNames)) {
+                    return this;
+                }
+                return new Method(managedReference, flagsBitMap, d, name, r, parameterNames, parameterTypes,
+                        thrownExceptions, annotations, defaultValue, declaredFormalTypeNames);
+            }
             this.name = name;
             this.flagsBitMap = flagsBitMap;
-            this.declaringType = unknownIfNull(declaringType);
-            this.returnType = unknownIfNull(returnType);
+            this.declaringType = d;
+            this.returnType = r;
             this.parameterNames = parameterNames;
-            this.parameterTypes = ListUtils.nullIfEmpty(parameterTypes);
-            this.thrownExceptions = ListUtils.nullIfEmpty(thrownExceptions);
-            this.annotations = ListUtils.nullIfEmpty(annotations);
+            this.parameterTypes = parameterTypes;
+            this.thrownExceptions = thrownExceptions;
+            this.annotations = annotations;
             this.defaultValue = defaultValue;
-            this.declaredFormalTypeNames = ListUtils.nullIfEmpty(declaredFormalTypeNames);
+            this.declaredFormalTypeNames = declaredFormalTypeNames;
             return this;
         }
 
@@ -1710,6 +1924,16 @@ public interface JavaType {
         @NonFinal
         FullyQualified @Nullable [] annotations;
 
+        @Getter(AccessLevel.NONE)
+        @NonFinal
+        @JsonIgnore
+        transient boolean frozen;
+
+        @Override
+        public void freeze() {
+            frozen = true;
+        }
+
         public Variable(@Nullable Integer managedReference, long flagsBitMap, String name, @Nullable JavaType owner,
                         @Nullable JavaType type, @Nullable List<FullyQualified> annotations) {
             this(
@@ -1730,6 +1954,14 @@ public interface JavaType {
             this.owner = owner;
             this.type = unknownIfNull(type);
             this.annotations = nullIfEmpty(annotations);
+        }
+
+        /**
+         * For Lombok's {@code @With}, which passes every field. Copies are never frozen.
+         */
+        private Variable(@Nullable Integer managedReference, long flagsBitMap, String name, @Nullable JavaType owner,
+                         @Nullable JavaType type, FullyQualified @Nullable [] annotations, boolean frozen) {
+            this(managedReference, flagsBitMap, name, owner, type, annotations);
         }
 
         @JsonCreator
@@ -1772,27 +2004,32 @@ public interface JavaType {
 
         public Variable unsafeSet(String name, long flagsBitMap, JavaType owner, @Nullable JavaType type,
                                   FullyQualified @Nullable [] annotations) {
-            this.name = name;
-            this.flagsBitMap = flagsBitMap;
-            this.owner = owner;
-            this.type = unknownIfNull(type);
-            this.annotations = annotations;
-            return this;
+            return set(name, flagsBitMap, owner, type, annotations);
         }
 
         public Variable unsafeSet(JavaType owner, @Nullable JavaType type,
                                   @Nullable List<FullyQualified> annotations) {
-            this.owner = owner;
-            this.type = unknownIfNull(type);
-            this.annotations = arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY);
-            return this;
+            return set(name, flagsBitMap, owner, type, arrayOrNullIfEmpty(annotations, EMPTY_FULLY_QUALIFIED_ARRAY));
         }
 
         public Variable unsafeSet(JavaType owner, @Nullable JavaType type,
                                   FullyQualified @Nullable [] annotations) {
+            return set(name, flagsBitMap, owner, type, ListUtils.nullIfEmpty(annotations));
+        }
+
+        private Variable set(String name, long flagsBitMap, @Nullable JavaType owner, @Nullable JavaType type,
+                             FullyQualified @Nullable [] annotations) {
+            JavaType t = unknownIfNull(type);
+            if (frozen) {
+                return name.equals(this.name) && flagsBitMap == this.flagsBitMap && owner == this.owner &&
+                       t == this.type && SameElements.of(annotations, this.annotations) ? this :
+                        new Variable(managedReference, flagsBitMap, name, owner, t, annotations);
+            }
+            this.name = name;
+            this.flagsBitMap = flagsBitMap;
             this.owner = owner;
-            this.type = unknownIfNull(type);
-            this.annotations = ListUtils.nullIfEmpty(annotations);
+            this.type = t;
+            this.annotations = annotations;
             return this;
         }
 
