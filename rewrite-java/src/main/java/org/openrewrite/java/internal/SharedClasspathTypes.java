@@ -19,7 +19,10 @@ import org.jspecify.annotations.Nullable;
 import org.openrewrite.Incubating;
 import org.openrewrite.java.tree.JavaType;
 
+import java.io.IOException;
 import java.lang.ref.SoftReference;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
@@ -58,6 +61,29 @@ public final class SharedClasspathTypes {
             TABLES.put(environmentKey, new SoftReference<>(table));
         }
         return table;
+    }
+
+    /**
+     * Identifies a parser environment: the parser implementation, the JDK, and the jars on the classpath, in order.
+     * Directory entries are left out because their classes are never shared.
+     */
+    public static String environmentKey(Class<?> parserType, @Nullable Collection<Path> classpath) {
+        StringBuilder key = new StringBuilder(parserType.getName())
+                .append('|').append(System.getProperty("java.home"));
+        if (classpath != null) {
+            for (Path entry : classpath) {
+                if (Files.isDirectory(entry)) {
+                    continue;
+                }
+                key.append('|').append(entry.toAbsolutePath());
+                try {
+                    key.append(':').append(Files.size(entry)).append(':').append(Files.getLastModifiedTime(entry).toMillis());
+                } catch (IOException ignored) {
+                    key.append(":missing");
+                }
+            }
+        }
+        return key.toString();
     }
 
     /**
