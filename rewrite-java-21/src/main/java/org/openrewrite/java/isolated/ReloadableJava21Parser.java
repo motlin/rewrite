@@ -61,8 +61,6 @@ import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
@@ -154,7 +152,7 @@ public class ReloadableJava21Parser implements JavaParser {
         // A configured factory may serve types that are not what this classpath maps to, so only share the default's.
         // Lombok changes only source classes, which are never shared.
         if (shareClasspathTypes && typeFactory == null) {
-            sharedTypesKey = sharedTypesKey(classpath, classBytesClasspath);
+            sharedTypesKey = sharedTypesKey(classpath);
         }
 
         // MUST be created (registered with the context) after pfm and compilerLog
@@ -228,7 +226,7 @@ public class ReloadableJava21Parser implements JavaParser {
                     throw t;
                 }
                 if (sharing != null && sharedTypesKey != null) {
-                    sharing.promote(this::isReadFromClassFile);
+                    sharing.promote(this::isReadFromJarOrJdk);
                 }
                 //noinspection DataFlowIssue
                 cuByPath.setValue(null); // allow memory used by this JCCompilationUnit to be released
@@ -352,22 +350,26 @@ public class ReloadableJava21Parser implements JavaParser {
         }
         SharedClasspathTypes.Table table = SharedClasspathTypes.table(sharedTypesKey);
         for (Symbol.ClassSymbol c : Symtab.instance(context).getAllClasses()) {
-            if (isDeclaredInSource(c) && table.containsClass(c.flatName().toString())) {
-                // A source declares a class that the shared types reference in its class-file form.
+            if ((isDeclaredInSource(c) || isReadFromUnsharedClassFile(c)) && table.containsClass(c.flatName().toString())) {
+                // A source or a classpath directory declares a class that the shared types reference in its jar form.
                 return null;
             }
         }
         return new SharingJavaTypeFactory(typeFactory, table);
     }
 
-    private boolean isReadFromClassFile(String flatName) {
+    /**
+     * Whether every class javac holds by this name was read from a jar or the JDK. Classes in classpath directories
+     * or class bytes can change without changing {@link #sharedTypesKey}, so they are never shared.
+     */
+    private boolean isReadFromJarOrJdk(String flatName) {
         // javac can hold one symbol per module for a name, and those it has only seen referenced have no file.
         boolean read = false;
         for (Symbol.ClassSymbol c : Symtab.instance(context).getClassesForName(Names.instance(context).fromString(flatName))) {
-            if (isDeclaredInSource(c)) {
+            if (isDeclaredInSource(c) || isReadFromUnsharedClassFile(c)) {
                 return false;
             }
-            read |= isReadFromClassFile(c);
+            read |= isReadFromJarOrJdk(c);
         }
         return read;
     }
@@ -384,30 +386,36 @@ public class ReloadableJava21Parser implements JavaParser {
         return c.classfile != null && c.classfile.getKind() == JavaFileObject.Kind.CLASS;
     }
 
-    private static String sharedTypesKey(@Nullable Collection<Path> classpath, Collection<byte[]> classBytesClasspath) {
+    private static boolean isReadFromJarOrJdk(Symbol.ClassSymbol c) {
+        if (!isReadFromClassFile(c)) {
+            return false;
+        }
+        String scheme = c.classfile.toUri().getScheme();
+        return "jar".equals(scheme) || "jrt".equals(scheme);
+    }
+
+    private static boolean isReadFromUnsharedClassFile(Symbol.ClassSymbol c) {
+        return isReadFromClassFile(c) && !isReadFromJarOrJdk(c);
+    }
+
+    /**
+     * Identifies the JDK and the jars on the classpath, in order. Directory entries are left out because their
+     * classes are never shared.
+     */
+    private static String sharedTypesKey(@Nullable Collection<Path> classpath) {
         StringBuilder key = new StringBuilder(ReloadableJava21Parser.class.getName())
-                .append('|').append(System.getProperty("java.home"))
-                .append('|').append(System.getProperty("java.class.path"));
+                .append('|').append(System.getProperty("java.home"));
         if (classpath != null) {
             for (Path entry : classpath) {
+                if (Files.isDirectory(entry)) {
+                    continue;
+                }
                 key.append('|').append(entry.toAbsolutePath());
                 try {
                     key.append(':').append(Files.size(entry)).append(':').append(Files.getLastModifiedTime(entry).toMillis());
                 } catch (IOException ignored) {
                     key.append(":missing");
                 }
-            }
-        }
-        if (!classBytesClasspath.isEmpty()) {
-            try {
-                MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                for (byte[] classBytes : classBytesClasspath) {
-                    digest.update(classBytes);
-                    digest.update((byte) 0);
-                }
-                key.append("|bytes:").append(new java.math.BigInteger(1, digest.digest()).toString(16));
-            } catch (NoSuchAlgorithmException e) {
-                throw new IllegalStateException(e);
             }
         }
         return key.toString();

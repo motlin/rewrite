@@ -285,9 +285,9 @@ public interface JavaParser extends Parser {
         }
 
         /**
-         * When true, types mapped from the classpath and the JDK are shared with every other parser in this JVM
-         * that has the same classpath and also shares, so they are mapped once per JVM instead of once per parser.
-         * Types declared by the parsed sources are never shared. Intended for test suites, which build a fresh
+         * When true, types mapped from classpath jars and the JDK are shared with every other parser in this JVM
+         * that has the same jars and also shares, so they are mapped once per JVM instead of once per parser.
+         * Types declared by the parsed sources or read from classpath directories are never shared. Intended for test suites, which build a fresh
          * parser for every test. Ignored when a {@link #typeFactory(JavaTypeFactory)} is configured, and after {@link JavaParser#setClasspath(Collection)}. Defaults to the {@value #SHARE_CLASSPATH_TYPES_PROPERTY} system property.
          */
         @Incubating(since = "8.94.0")
