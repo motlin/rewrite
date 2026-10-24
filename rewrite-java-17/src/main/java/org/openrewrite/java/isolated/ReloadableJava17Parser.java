@@ -15,6 +15,8 @@
  */
 package org.openrewrite.java.isolated;
 
+import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Symtab;
 import com.sun.tools.javac.comp.Annotate;
 import com.sun.tools.javac.comp.Check;
 import com.sun.tools.javac.comp.Enter;
@@ -25,6 +27,7 @@ import com.sun.tools.javac.main.Option;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.Log;
+import com.sun.tools.javac.util.Names;
 import com.sun.tools.javac.util.Options;
 import lombok.Getter;
 import org.jspecify.annotations.NullMarked;
@@ -40,6 +43,8 @@ import org.openrewrite.java.JavaParsingException;
 import org.openrewrite.java.internal.DefaultJavaTypeFactory;
 import org.openrewrite.java.internal.JavaTypeCache;
 import org.openrewrite.java.internal.JavaTypeFactory;
+import org.openrewrite.java.internal.SharedClasspathTypes;
+import org.openrewrite.java.internal.SharingJavaTypeFactory;
 import org.openrewrite.java.lombok.LombokSupport;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.java.tree.Space;
@@ -85,6 +90,11 @@ public class ReloadableJava17Parser implements JavaParser {
     private final List<Processor> annotationProcessors;
     private final boolean typeAttribution;
 
+    /**
+     * Identifies the classpath and JDK for {@link SharedClasspathTypes}, or null when this parser does not share.
+     */
+    private @Nullable String sharedTypesKey;
+
     private ReloadableJava17Parser(
             boolean logCompilationWarningsAndErrors,
             boolean typeAttribution,
@@ -94,7 +104,8 @@ public class ReloadableJava17Parser implements JavaParser {
             Charset charset,
             Collection<NamedStyles> styles,
             JavaTypeCache typeCache,
-            @Nullable JavaTypeFactory typeFactory) {
+            @Nullable JavaTypeFactory typeFactory,
+            boolean shareClasspathTypes) {
         this.classpath = classpath;
         this.dependsOn = dependsOn;
         this.styles = styles;
@@ -135,6 +146,12 @@ public class ReloadableJava17Parser implements JavaParser {
             } catch (ReflectiveOperationException ignore) {
                 // Lombok was not found or could not be initialized
             }
+        }
+
+        // A configured factory may serve types that are not what this classpath maps to, so only share the default's.
+        // Lombok changes only source classes, which are never shared.
+        if (shareClasspathTypes && typeFactory == null) {
+            sharedTypesKey = SharedClasspathTypes.environmentKey(ReloadableJava17Parser.class, classpath);
         }
 
         // MUST be created (registered with the context) after pfm and compilerLog
@@ -180,6 +197,8 @@ public class ReloadableJava17Parser implements JavaParser {
     public Stream<SourceFile> parseInputs(Iterable<Input> sourceFiles, @Nullable Path relativeTo, ExecutionContext ctx) {
         ParsingEventListener parsingListener = ParsingExecutionContextView.view(ctx).getParsingListener();
         LinkedHashMap<Input, JCTree.JCCompilationUnit> cus = parseInputsToCompilerAst(sourceFiles, ctx);
+        SharingJavaTypeFactory sharing = sharingTypeFactory();
+        JavaTypeFactory typeFactory = sharing == null ? this.typeFactory : sharing;
         return cus.entrySet().stream().map(cuByPath -> {
             Input input = cuByPath.getKey();
             parsingListener.startedParsing(input);
@@ -194,7 +213,22 @@ public class ReloadableJava17Parser implements JavaParser {
                         context
                 );
 
-                J.CompilationUnit cu = (J.CompilationUnit) parser.scan(cuByPath.getValue(), Space.EMPTY);
+                J.CompilationUnit cu;
+                try {
+                    cu = (J.CompilationUnit) parser.scan(cuByPath.getValue(), Space.EMPTY);
+                } catch (Throwable t) {
+                    if (sharing != null) {
+                        // Types may be half built, here and in the type cache, which other parsers built from the
+                        // same builder also read and could otherwise share.
+                        sharing.discard();
+                        sharedTypesKey = null;
+                        typeCache.clear();
+                    }
+                    throw t;
+                }
+                if (sharing != null && sharedTypesKey != null) {
+                    sharing.promote(this::isReadFromJarOrJdk);
+                }
                 //noinspection DataFlowIssue
                 cuByPath.setValue(null); // allow memory used by this JCCompilationUnit to be released
                 parsingListener.parsed(input, cu);
@@ -307,6 +341,62 @@ public class ReloadableJava17Parser implements JavaParser {
     @Override
     public void setClasspath(Collection<Path> classpath) {
         this.classpath = classpath;
+        // javac keeps symbols read from the previous classpath, so this parser's types no longer match a key.
+        this.sharedTypesKey = null;
+    }
+
+    private @Nullable SharingJavaTypeFactory sharingTypeFactory() {
+        if (sharedTypesKey == null) {
+            return null;
+        }
+        SharedClasspathTypes.Table table = SharedClasspathTypes.table(sharedTypesKey);
+        for (Symbol.ClassSymbol c : Symtab.instance(context).getAllClasses()) {
+            if ((isDeclaredInSource(c) || isReadFromUnsharedClassFile(c)) && table.containsClass(c.flatName().toString())) {
+                // A source or a classpath directory declares a class that the shared types reference in its jar form.
+                return null;
+            }
+        }
+        return new SharingJavaTypeFactory(typeFactory, table);
+    }
+
+    /**
+     * Whether every class javac holds by this name was read from a jar or the JDK. Classes in classpath directories
+     * or class bytes can change without changing {@link #sharedTypesKey}, so they are never shared.
+     */
+    private boolean isReadFromJarOrJdk(String flatName) {
+        // javac can hold one symbol per module for a name, and those it has only seen referenced have no file.
+        boolean read = false;
+        for (Symbol.ClassSymbol c : Symtab.instance(context).getClassesForName(Names.instance(context).fromString(flatName))) {
+            if (isDeclaredInSource(c) || isReadFromUnsharedClassFile(c)) {
+                return false;
+            }
+            read |= isReadFromJarOrJdk(c);
+        }
+        return read;
+    }
+
+    /**
+     * Classes javac has only seen referenced, and not yet read, have neither file, so they count as not declared
+     * in source; until read they are also not mapped.
+     */
+    private static boolean isDeclaredInSource(Symbol.ClassSymbol c) {
+        return !isReadFromClassFile(c) && c.sourcefile != null && c.sourcefile.getKind() == JavaFileObject.Kind.SOURCE;
+    }
+
+    private static boolean isReadFromClassFile(Symbol.ClassSymbol c) {
+        return c.classfile != null && c.classfile.getKind() == JavaFileObject.Kind.CLASS;
+    }
+
+    private static boolean isReadFromJarOrJdk(Symbol.ClassSymbol c) {
+        if (!isReadFromClassFile(c)) {
+            return false;
+        }
+        String scheme = c.classfile.toUri().getScheme();
+        return "jar".equals(scheme) || "jrt".equals(scheme);
+    }
+
+    private static boolean isReadFromUnsharedClassFile(Symbol.ClassSymbol c) {
+        return isReadFromClassFile(c) && !isReadFromJarOrJdk(c);
     }
 
     private void compileDependencies() {
@@ -356,7 +446,7 @@ public class ReloadableJava17Parser implements JavaParser {
     public static class Builder extends JavaParser.Builder<ReloadableJava17Parser, Builder> {
         @Override
         public ReloadableJava17Parser build() {
-            return new ReloadableJava17Parser(logCompilationWarningsAndErrors, typeAttribution, resolvedClasspath(), classBytesClasspath, dependsOn, charset, styles, javaTypeCache, javaTypeFactory);
+            return new ReloadableJava17Parser(logCompilationWarningsAndErrors, typeAttribution, resolvedClasspath(), classBytesClasspath, dependsOn, charset, styles, javaTypeCache, javaTypeFactory, shareClasspathTypes);
         }
     }
 

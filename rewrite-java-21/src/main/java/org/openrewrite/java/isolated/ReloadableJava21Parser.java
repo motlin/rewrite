@@ -59,7 +59,6 @@ import javax.tools.*;
 import java.io.*;
 import java.net.URI;
 import java.nio.charset.Charset;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -152,7 +151,7 @@ public class ReloadableJava21Parser implements JavaParser {
         // A configured factory may serve types that are not what this classpath maps to, so only share the default's.
         // Lombok changes only source classes, which are never shared.
         if (shareClasspathTypes && typeFactory == null) {
-            sharedTypesKey = sharedTypesKey(classpath);
+            sharedTypesKey = SharedClasspathTypes.environmentKey(ReloadableJava21Parser.class, classpath);
         }
 
         // MUST be created (registered with the context) after pfm and compilerLog
@@ -398,29 +397,6 @@ public class ReloadableJava21Parser implements JavaParser {
 
     private static boolean isReadFromUnsharedClassFile(Symbol.ClassSymbol c) {
         return isReadFromClassFile(c) && !isReadFromJarOrJdk(c);
-    }
-
-    /**
-     * Identifies the JDK and the jars on the classpath, in order. Directory entries are left out because their
-     * classes are never shared.
-     */
-    private static String sharedTypesKey(@Nullable Collection<Path> classpath) {
-        StringBuilder key = new StringBuilder(ReloadableJava21Parser.class.getName())
-                .append('|').append(System.getProperty("java.home"));
-        if (classpath != null) {
-            for (Path entry : classpath) {
-                if (Files.isDirectory(entry)) {
-                    continue;
-                }
-                key.append('|').append(entry.toAbsolutePath());
-                try {
-                    key.append(':').append(Files.size(entry)).append(':').append(Files.getLastModifiedTime(entry).toMillis());
-                } catch (IOException ignored) {
-                    key.append(":missing");
-                }
-            }
-        }
-        return key.toString();
     }
 
     private void compileDependencies() {
