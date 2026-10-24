@@ -45,9 +45,9 @@ public class SharingJavaTypeFactory implements JavaTypeFactory {
      * Share the classpath types returned since the last call. Call only when no type is half built, that is
      * between compilation units and never after the type mapping threw.
      */
-    public void promote(Predicate<String> isClassFile) {
+    public void promote(Predicate<String> isShareable) {
         if (!candidates.isEmpty()) {
-            table.promote(candidates, isClassFile);
+            table.promote(candidates, isShareable);
             candidates.clear();
         }
     }

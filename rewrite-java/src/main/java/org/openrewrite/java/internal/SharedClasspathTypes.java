@@ -29,11 +29,11 @@ import java.util.function.Predicate;
  * environment (parser implementation, JDK, and classpath identity), so parsers that share an environment
  * map each classpath type once.
  * <p>
- * A table only ever holds types whose whole reachable type graph consists of classes read from class files.
- * Types declared by parsed sources, types that reach them, and types that reach {@link JavaType.Unknown}
- * (which stands in for a missing class whose name a later parse could declare) stay private to their parser.
- * A parser whose sources declare a class the table already holds must not use the table at all, because the
- * shared types reference the class-file version of that class.
+ * A table only ever holds types whose whole reachable type graph consists of classes read from jars or the JDK.
+ * Types declared by parsed sources or read from classpath directories or class bytes, types that reach them, and
+ * types that reach {@link JavaType.Unknown} (which stands in for a missing class whose name a later parse could
+ * declare) stay private to their parser. A parser whose sources or classpath directories declare a class the table
+ * already holds must not use the table at all, because the shared types reference the jar version of that class.
  * <p>
  * Shared instances are reachable from the trees of every parse that uses the table, so they must never be
  * mutated after they are shared.
@@ -96,9 +96,9 @@ public final class SharedClasspathTypes {
          * Share each candidate whose reachable type graph is free of source and missing types.
          *
          * @param candidates  types a parser built or looked up, by cache key; every one must be fully initialized
-         * @param isClassFile whether the class with this fully qualified name was read from a class file
+         * @param isShareable whether the class with this fully qualified name was read from a jar or the JDK
          */
-        synchronized void promote(Map<String, Object> candidates, Predicate<String> isClassFile) {
+        synchronized void promote(Map<String, Object> candidates, Predicate<String> isShareable) {
             Map<Object, Boolean> visited = new IdentityHashMap<>();
             Map<Object, List<Object>> referrers = new IdentityHashMap<>();
             Deque<Object> impure = new ArrayDeque<>();
@@ -115,7 +115,7 @@ public final class SharedClasspathTypes {
                     continue;
                 }
                 children.clear();
-                if (!children(t, children, isClassFile)) {
+                if (!children(t, children, isShareable)) {
                     impure.add(t);
                 }
                 for (Object child : children) {
@@ -161,7 +161,7 @@ public final class SharedClasspathTypes {
          *
          * @return false when {@code t} itself must not be shared
          */
-        private static boolean children(Object t, List<Object> children, Predicate<String> isClassFile) {
+        private static boolean children(Object t, List<Object> children, Predicate<String> isShareable) {
             if (t instanceof JavaType.Unknown || t instanceof JavaType.ShallowClass) {
                 return false;
             } else if (t instanceof JavaType.Primitive) {
@@ -195,7 +195,7 @@ public final class SharedClasspathTypes {
                 children.addAll(c.getInterfaces());
                 children.addAll(c.getMembers());
                 children.addAll(c.getMethods());
-                return isClassFile.test(c.getFullyQualifiedName());
+                return isShareable.test(c.getFullyQualifiedName());
             } else if (t instanceof JavaType.GenericTypeVariable) {
                 children.addAll(((JavaType.GenericTypeVariable) t).getBounds());
                 return true;
