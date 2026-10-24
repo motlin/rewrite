@@ -15,6 +15,8 @@
  */
 package org.openrewrite.java.isolated;
 
+import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Symtab;
 import com.sun.tools.javac.comp.Annotate;
 import com.sun.tools.javac.comp.Check;
 import com.sun.tools.javac.comp.Enter;
@@ -25,6 +27,7 @@ import com.sun.tools.javac.main.Option;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.Log;
+import com.sun.tools.javac.util.Names;
 import com.sun.tools.javac.util.Options;
 import lombok.Getter;
 import org.jspecify.annotations.NullMarked;
@@ -40,6 +43,8 @@ import org.openrewrite.java.JavaParsingException;
 import org.openrewrite.java.internal.DefaultJavaTypeFactory;
 import org.openrewrite.java.internal.JavaTypeCache;
 import org.openrewrite.java.internal.JavaTypeFactory;
+import org.openrewrite.java.internal.SharedClasspathTypes;
+import org.openrewrite.java.internal.SharingJavaTypeFactory;
 import org.openrewrite.java.lombok.LombokSupport;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.java.tree.Space;
@@ -54,7 +59,10 @@ import javax.tools.*;
 import java.io.*;
 import java.net.URI;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
@@ -85,6 +93,11 @@ public class ReloadableJava21Parser implements JavaParser {
     private final List<Processor> annotationProcessors;
     private final boolean typeAttribution;
 
+    /**
+     * Identifies the classpath and JDK for {@link SharedClasspathTypes}, or null when this parser does not share.
+     */
+    private @Nullable String sharedTypesKey;
+
     private ReloadableJava21Parser(
             boolean logCompilationWarningsAndErrors,
             boolean typeAttribution,
@@ -94,7 +107,8 @@ public class ReloadableJava21Parser implements JavaParser {
             Charset charset,
             Collection<NamedStyles> styles,
             JavaTypeCache typeCache,
-            @Nullable JavaTypeFactory typeFactory) {
+            @Nullable JavaTypeFactory typeFactory,
+            boolean shareClasspathTypes) {
         this.classpath = classpath;
         this.dependsOn = dependsOn;
         this.styles = styles;
@@ -135,6 +149,12 @@ public class ReloadableJava21Parser implements JavaParser {
             } catch (ReflectiveOperationException ignore) {
                 // Lombok was not found or could not be initialized
             }
+        }
+
+        // A configured factory may serve types that are not what this classpath maps to, so only share the default's.
+        // Lombok changes only source classes, which are never shared.
+        if (shareClasspathTypes && typeFactory == null) {
+            sharedTypesKey = sharedTypesKey(classpath, classBytesClasspath);
         }
 
         // MUST be created (registered with the context) after pfm and compilerLog
@@ -180,6 +200,8 @@ public class ReloadableJava21Parser implements JavaParser {
     public Stream<SourceFile> parseInputs(Iterable<Input> sourceFiles, @Nullable Path relativeTo, ExecutionContext ctx) {
         ParsingEventListener parsingListener = ParsingExecutionContextView.view(ctx).getParsingListener();
         LinkedHashMap<Input, JCTree.JCCompilationUnit> cus = parseInputsToCompilerAst(sourceFiles, ctx);
+        SharingJavaTypeFactory sharing = sharingTypeFactory();
+        JavaTypeFactory typeFactory = sharing == null ? this.typeFactory : sharing;
         return cus.entrySet().stream().map(cuByPath -> {
             Input input = cuByPath.getKey();
             parsingListener.startedParsing(input);
@@ -194,7 +216,20 @@ public class ReloadableJava21Parser implements JavaParser {
                         context
                 );
 
-                J.CompilationUnit cu = (J.CompilationUnit) parser.scan(cuByPath.getValue(), Space.EMPTY);
+                J.CompilationUnit cu;
+                try {
+                    cu = (J.CompilationUnit) parser.scan(cuByPath.getValue(), Space.EMPTY);
+                } catch (Throwable t) {
+                    if (sharing != null) {
+                        // Types may be half built, here and in this parser's own cache for later parses.
+                        sharing.discard();
+                        sharedTypesKey = null;
+                    }
+                    throw t;
+                }
+                if (sharing != null && sharedTypesKey != null) {
+                    sharing.promote(this::isReadFromClassFile);
+                }
                 //noinspection DataFlowIssue
                 cuByPath.setValue(null); // allow memory used by this JCCompilationUnit to be released
                 parsingListener.parsed(input, cu);
@@ -307,6 +342,75 @@ public class ReloadableJava21Parser implements JavaParser {
     @Override
     public void setClasspath(Collection<Path> classpath) {
         this.classpath = classpath;
+        // javac keeps symbols read from the previous classpath, so this parser's types no longer match a key.
+        this.sharedTypesKey = null;
+    }
+
+    private @Nullable SharingJavaTypeFactory sharingTypeFactory() {
+        if (sharedTypesKey == null) {
+            return null;
+        }
+        SharedClasspathTypes.Table table = SharedClasspathTypes.table(sharedTypesKey);
+        for (Symbol.ClassSymbol c : Symtab.instance(context).getAllClasses()) {
+            if (isDeclaredInSource(c) && table.containsClass(c.flatName().toString())) {
+                // A source declares a class that the shared types reference in its class-file form.
+                return null;
+            }
+        }
+        return new SharingJavaTypeFactory(typeFactory, table);
+    }
+
+    private boolean isReadFromClassFile(String flatName) {
+        // javac can hold one symbol per module for a name, and those it has only seen referenced have no file.
+        boolean read = false;
+        for (Symbol.ClassSymbol c : Symtab.instance(context).getClassesForName(Names.instance(context).fromString(flatName))) {
+            if (isDeclaredInSource(c)) {
+                return false;
+            }
+            read |= isReadFromClassFile(c);
+        }
+        return read;
+    }
+
+    /**
+     * Classes javac has only seen referenced, and not yet read, have neither file, so they count as not declared
+     * in source; until read they are also not mapped.
+     */
+    private static boolean isDeclaredInSource(Symbol.ClassSymbol c) {
+        return !isReadFromClassFile(c) && c.sourcefile != null && c.sourcefile.getKind() == JavaFileObject.Kind.SOURCE;
+    }
+
+    private static boolean isReadFromClassFile(Symbol.ClassSymbol c) {
+        return c.classfile != null && c.classfile.getKind() == JavaFileObject.Kind.CLASS;
+    }
+
+    private static String sharedTypesKey(@Nullable Collection<Path> classpath, Collection<byte[]> classBytesClasspath) {
+        StringBuilder key = new StringBuilder(ReloadableJava21Parser.class.getName())
+                .append('|').append(System.getProperty("java.home"))
+                .append('|').append(System.getProperty("java.class.path"));
+        if (classpath != null) {
+            for (Path entry : classpath) {
+                key.append('|').append(entry.toAbsolutePath());
+                try {
+                    key.append(':').append(Files.size(entry)).append(':').append(Files.getLastModifiedTime(entry).toMillis());
+                } catch (IOException ignored) {
+                    key.append(":missing");
+                }
+            }
+        }
+        if (!classBytesClasspath.isEmpty()) {
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                for (byte[] classBytes : classBytesClasspath) {
+                    digest.update(classBytes);
+                    digest.update((byte) 0);
+                }
+                key.append("|bytes:").append(new java.math.BigInteger(1, digest.digest()).toString(16));
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+        return key.toString();
     }
 
     private void compileDependencies() {
@@ -356,7 +460,7 @@ public class ReloadableJava21Parser implements JavaParser {
     public static class Builder extends JavaParser.Builder<ReloadableJava21Parser, Builder> {
         @Override
         public ReloadableJava21Parser build() {
-            return new ReloadableJava21Parser(logCompilationWarningsAndErrors, typeAttribution, resolvedClasspath(), classBytesClasspath, dependsOn, charset, styles, javaTypeCache, javaTypeFactory);
+            return new ReloadableJava21Parser(logCompilationWarningsAndErrors, typeAttribution, resolvedClasspath(), classBytesClasspath, dependsOn, charset, styles, javaTypeCache, javaTypeFactory, shareClasspathTypes);
         }
     }
 
