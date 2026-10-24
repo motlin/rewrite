@@ -17,6 +17,7 @@ package org.openrewrite.java;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.openrewrite.InMemoryExecutionContext;
 import org.openrewrite.SourceFile;
 import org.openrewrite.java.internal.DefaultJavaTypeFactory;
@@ -26,12 +27,19 @@ import org.openrewrite.java.tree.J;
 import org.openrewrite.java.tree.JavaType;
 import org.openrewrite.java.tree.TypeUtils;
 
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 
 import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -116,6 +124,97 @@ class SharedClasspathTypesTest {
         List<String> shared = describe(fieldOrMethodTypes(parse(true, source)));
 
         assertThat(shared).isEqualTo(fresh);
+    }
+
+    @Test
+    void classRecompiledIntoADirectoryIsNotServedStale(@TempDir Path tmp) throws IOException {
+        Path dir = Files.createDirectory(tmp.resolve("classes"));
+        compile(dir, "package p.q; public class Foo { public void one() {} }");
+        parse(true, dir, "class A { p.q.Foo f; }");
+
+        compile(dir, "package p.q; public class Foo { public void two() {} }");
+        List<SourceFile> second = parse(true, dir, "class A { p.q.Foo f; }");
+
+        assertThat(methodNames((JavaType.FullyQualified) fieldType(second, "A", "f"))).containsExactly("two");
+    }
+
+    @Test
+    void sharesClassesReadFromJars(@TempDir Path tmp) throws IOException {
+        Path jar = jar(tmp, "package p.q; public class Foo { public void one() {} }");
+        JavaType first = fieldType(parse(true, jar, "class A { p.q.Foo f; }"), "A", "f");
+        JavaType second = fieldType(parse(true, jar, "class B { p.q.Foo f; }"), "B", "f");
+
+        assertThat(second).isSameAs(first);
+    }
+
+    @Test
+    void directoryClassShadowingASharedJarClassIsNotReplacedBySharedType(@TempDir Path tmp) throws IOException {
+        Path jar = jar(tmp, "package p.q; public class Foo { public void one() {} }");
+        Path dir = Files.createDirectory(tmp.resolve("classes"));
+        parse(true, List.of(dir, jar), "class A { p.q.Foo f; }");
+
+        compile(dir, "package p.q; public class Foo { public void two() {} }");
+        List<SourceFile> second = parse(true, List.of(dir, jar), "class A { p.q.Foo f; }");
+
+        assertThat(methodNames((JavaType.FullyQualified) fieldType(second, "A", "f"))).containsExactly("two");
+    }
+
+    @Test
+    void doesNotShareClassesFromClassBytes(@TempDir Path tmp) throws IOException {
+        Path dir = Files.createDirectory(tmp.resolve("classes"));
+        compile(dir, "package p.q; public class Foo { public void one() {} }");
+        byte[] foo = Files.readAllBytes(dir.resolve("p/q/Foo.class"));
+
+        JavaType first = fieldType(parseWithClassBytes(foo, "class A { p.q.Foo f; }"), "A", "f");
+        JavaType second = fieldType(parseWithClassBytes(foo, "class B { p.q.Foo f; }"), "B", "f");
+
+        assertThat(second).isNotSameAs(first);
+    }
+
+    private static List<SourceFile> parseWithClassBytes(byte[] classBytes, String... sources) {
+        return JavaParser.fromJavaVersion()
+                .classpath(ASSERTJ)
+                .classpath(classBytes)
+                .shareClasspathTypes(true)
+                .build()
+                .parse(new InMemoryExecutionContext(t -> {
+                }), sources)
+                .collect(toList());
+    }
+
+    private static void compile(Path outputDir, String source) throws IOException {
+        Path src = Files.createTempDirectory("shared-classpath-types-src");
+        Path file = src.resolve("Foo.java");
+        Files.writeString(file, source);
+        JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
+        int status = javac.run(null, null, null, "-d", outputDir.toString(), file.toString());
+        assertThat(status).isZero();
+    }
+
+    private static Path jar(Path tmp, String source) throws IOException {
+        Path classes = Files.createTempDirectory(tmp, "jar-classes");
+        compile(classes, source);
+        Path jar = tmp.resolve("foo.jar");
+        try (OutputStream out = Files.newOutputStream(jar); JarOutputStream jarOut = new JarOutputStream(out)) {
+            jarOut.putNextEntry(new JarEntry("p/q/Foo.class"));
+            jarOut.write(Files.readAllBytes(classes.resolve("p/q/Foo.class")));
+            jarOut.closeEntry();
+        }
+        return jar;
+    }
+
+    private static List<SourceFile> parse(boolean share, Path classpathEntry, String... sources) {
+        return parse(share, List.of(classpathEntry), sources);
+    }
+
+    private static List<SourceFile> parse(boolean share, Collection<Path> classpath, String... sources) {
+        return JavaParser.fromJavaVersion()
+                .classpath(classpath)
+                .shareClasspathTypes(share)
+                .build()
+                .parse(new InMemoryExecutionContext(t -> {
+                }), sources)
+                .collect(toList());
     }
 
     private static List<SourceFile> parse(boolean share, String... sources) {
