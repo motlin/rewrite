@@ -220,9 +220,11 @@ public class ReloadableJava21Parser implements JavaParser {
                     cu = (J.CompilationUnit) parser.scan(cuByPath.getValue(), Space.EMPTY);
                 } catch (Throwable t) {
                     if (sharing != null) {
-                        // Types may be half built, here and in this parser's own cache for later parses.
+                        // Types may be half built, here and in the type cache, which other parsers built from the
+                        // same builder also read and could otherwise share.
                         sharing.discard();
                         sharedTypesKey = null;
+                        typeCache.clear();
                     }
                     throw t;
                 }

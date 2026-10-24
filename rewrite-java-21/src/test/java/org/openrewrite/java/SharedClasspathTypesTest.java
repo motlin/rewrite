@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.openrewrite.InMemoryExecutionContext;
+import org.openrewrite.tree.ParseError;
 import org.openrewrite.SourceFile;
 import org.openrewrite.java.internal.DefaultJavaTypeFactory;
 import org.openrewrite.java.internal.JavaTypeCache;
@@ -38,6 +39,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
@@ -169,6 +171,90 @@ class SharedClasspathTypesTest {
         JavaType second = fieldType(parseWithClassBytes(foo, "class B { p.q.Foo f; }"), "B", "f");
 
         assertThat(second).isNotSameAs(first);
+    }
+
+    @Test
+    void changingASharedTypeInPlaceDoesNotLeakIntoLaterParses() {
+        JavaType.Parameterized first = (JavaType.Parameterized) fieldType(parse(true, "class A { org.assertj.core.data.Offset<Double> o; }"), "A", "o");
+
+        JavaType changed = first.unsafeSet(first.getType(), List.of(JavaType.Primitive.String));
+        JavaType.Parameterized second = (JavaType.Parameterized) fieldType(parse(true, "class B { org.assertj.core.data.Offset<Double> o; }"), "B", "o");
+
+        assertThat(changed.toString()).isEqualTo("org.assertj.core.data.Offset<String>");
+        assertThat(second.toString()).isEqualTo("org.assertj.core.data.Offset<java.lang.Double>");
+        assertThat(first.toString()).isEqualTo("org.assertj.core.data.Offset<java.lang.Double>");
+    }
+
+    @Test
+    void changingASharedClassInPlaceDoesNotLeakIntoLaterParses() {
+        JavaType.Parameterized first = (JavaType.Parameterized) fieldType(parse(true, "class A { org.assertj.core.data.Offset<Double> o; }"), "A", "o");
+        JavaType.Class offset = (JavaType.Class) first.getType();
+
+        JavaType.Class changed = offset.unsafeSet(offset.getTypeParameters(), offset.getSupertype(), offset.getOwningClass(),
+                offset.getAnnotations(), offset.getInterfaces(), offset.getMembers(), List.of());
+        JavaType.Parameterized second = (JavaType.Parameterized) fieldType(parse(true, "class B { org.assertj.core.data.Offset<Double> o; }"), "B", "o");
+
+        assertThat(changed.getMethods()).isEmpty();
+        assertThat(methodNames(second.getType())).contains("offset", "strictOffset");
+        assertThat(methodNames(offset)).contains("offset", "strictOffset");
+    }
+
+    @Test
+    void visitorChangingASharedTypeGetsACopy() {
+        JavaType.Parameterized first = (JavaType.Parameterized) fieldType(parse(true, "class A { org.assertj.core.data.Offset<Double> o; }"), "A", "o");
+
+        JavaType visited = new JavaTypeVisitor<Integer>() {
+            @Override
+            public JavaType visitClass(JavaType.Class aClass, Integer p) {
+                return "java.lang.Double".equals(aClass.getFullyQualifiedName()) ? JavaType.ShallowClass.build("java.lang.Long") : aClass;
+            }
+        }.visit(first, 0);
+        JavaType.Parameterized second = (JavaType.Parameterized) fieldType(parse(true, "class B { org.assertj.core.data.Offset<Double> o; }"), "B", "o");
+
+        assertThat(visited.toString()).isEqualTo("org.assertj.core.data.Offset<java.lang.Long>");
+        assertThat(second.toString()).isEqualTo("org.assertj.core.data.Offset<java.lang.Double>");
+    }
+
+    @Test
+    void visitorThatChangesNothingKeepsTheSharedType() {
+        JavaType.Parameterized first = (JavaType.Parameterized) fieldType(parse(true, "class A { org.assertj.core.data.Offset<Double> o; }"), "A", "o");
+
+        JavaType visited = new JavaTypeVisitor<Integer>() {
+            @Override
+            public JavaType visitClass(JavaType.Class aClass, Integer p) {
+                return aClass;
+            }
+        }.visit(first, 0);
+
+        assertThat(visited).isSameAs(first);
+    }
+
+    @Test
+    void siblingParserDoesNotShareTypesHalfBuiltByAFailedMapping() {
+        AtomicBoolean fail = new AtomicBoolean(true);
+        JavaTypeCache failOnceInsideOffset = new JavaTypeCache() {
+            @Override
+            public void put(String signature, Object o) {
+                if (signature.startsWith("org.assertj.core.data.Offset{") && fail.getAndSet(false)) {
+                    throw new IllegalStateException("simulated type mapping failure");
+                }
+                super.put(signature, o);
+            }
+        };
+        JavaParser.Builder<? extends JavaParser, ?> builder = JavaParser.fromJavaVersion()
+                .classpath(ASSERTJ)
+                .shareClasspathTypes(true)
+                .typeCache(failOnceInsideOffset);
+
+        List<SourceFile> failed = builder.build().parse(new InMemoryExecutionContext(t -> {
+        }), "class A { org.assertj.core.data.Offset<Double> o; }").collect(toList());
+        assertThat(failed).singleElement().isInstanceOf(ParseError.class);
+
+        builder.build().parse(new InMemoryExecutionContext(t -> {
+        }), "class B { org.assertj.core.data.Offset<Double> o; }").collect(toList());
+        JavaType.Parameterized fresh = (JavaType.Parameterized) fieldType(parse(true, "class C { org.assertj.core.data.Offset<Double> o; }"), "C", "o");
+
+        assertThat(methodNames(fresh.getType())).contains("offset", "strictOffset");
     }
 
     private static List<SourceFile> parseWithClassBytes(byte[] classBytes, String... sources) {
