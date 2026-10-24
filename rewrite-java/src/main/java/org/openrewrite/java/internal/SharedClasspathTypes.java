@@ -35,8 +35,8 @@ import java.util.function.Predicate;
  * declare) stay private to their parser. A parser whose sources or classpath directories declare a class the table
  * already holds must not use the table at all, because the shared types reference the jar version of that class.
  * <p>
- * Shared instances are reachable from the trees of every parse that uses the table, so they must never be
- * mutated after they are shared.
+ * Shared instances are reachable from the trees of every parse that uses the table, so they are
+ * {@linkplain JavaType#freeze() frozen} when shared: changing one through {@code unsafeSet} yields a copy.
  */
 @Incubating(since = "8.94.0")
 public final class SharedClasspathTypes {
@@ -143,6 +143,7 @@ public final class SharedClasspathTypes {
             for (Object t : visited.keySet()) {
                 if (!tainted.contains(t)) {
                     instances.add(t);
+                    ((JavaType) t).freeze();
                     if (t instanceof JavaType.Class) {
                         classNames.add(((JavaType.Class) t).getFullyQualifiedName());
                     }
