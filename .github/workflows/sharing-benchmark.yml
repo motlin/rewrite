@@ -1,0 +1,152 @@
+---
+name: sharing-benchmark
+
+on:
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ["off", "on"]
+        rep: [1, 2, 3]
+    env:
+      CODEGENOME_USERNAME: ${{ secrets.CODEGENOME_USERNAME }}
+      CODEGENOME_TOKEN: ${{ secrets.CODEGENOME_TOKEN }}
+      GRADLE_OPTS: -Dorg.gradle.java.installations.auto-download=false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+            21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+
+      - name: Runner info
+        run: |
+          lscpu | tee lscpu.txt
+          nproc
+          free -g
+          uname -r
+
+      - name: Try to enable perf
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=-1 || true
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" > /dev/null 2>&1 \
+            || sudo apt-get install -y -q linux-tools-common linux-tools-azure > /dev/null 2>&1 || true
+          if perf stat -e instructions,cycles -x, -- true 2> perf-probe.txt && ! grep -q "not supported\|not counted" perf-probe.txt; then
+            echo "PERF_EVENTS=task-clock,instructions,cycles" >> "$GITHUB_ENV"
+          elif perf stat -e task-clock -x, -- true 2>/dev/null; then
+            echo "PERF_EVENTS=task-clock" >> "$GITHUB_ENV"
+          fi
+          cat perf-probe.txt || true
+
+      - name: Write init script
+        run: |
+          cat > "$RUNNER_TEMP/share.init.gradle.kts" <<EOF
+          allprojects {
+              tasks.withType<Test>().configureEach {
+                  systemProperty("org.openrewrite.java.shareClasspathTypes", "${{ matrix.mode == 'on' }}")
+                  ignoreFailures = true
+              }
+          }
+          EOF
+          cat "$RUNNER_TEMP/share.init.gradle.kts"
+
+      - name: Compile (untimed)
+        run: |
+          ./gradlew --no-daemon --init-script "$RUNNER_TEMP/share.init.gradle.kts" \
+            :rewrite-java-21:compatibilityTestClasses :rewrite-java-test:testClasses \
+            :rewrite-java-21:jar :rewrite-java-test:jar
+
+      - name: Timed tests
+        run: |
+          cmd=(./gradlew --no-daemon --no-build-cache --init-script "$RUNNER_TEMP/share.init.gradle.kts"
+               :rewrite-java-21:compatibilityTest --rerun :rewrite-java-test:test --rerun)
+          if [ -n "${PERF_EVENTS:-}" ]; then
+            cmd=(perf stat -x, -o perf.txt -e "$PERF_EVENTS" -- "${cmd[@]}")
+          fi
+          start=$(date +%s.%N)
+          set +e
+          /usr/bin/time -v -o time.txt "${cmd[@]}"
+          echo "EXIT_CODE=$?" >> "$GITHUB_ENV"
+          end=$(date +%s.%N)
+          echo "WALL_SECONDS=$(echo "$end - $start" | bc)" >> "$GITHUB_ENV"
+          cat time.txt
+          cat perf.txt 2>/dev/null || true
+
+      - name: Summarize
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os, re
+          import xml.etree.ElementTree as ET
+
+          def suites(path):
+              total = {"time": 0.0, "tests": 0, "failures": 0, "errors": 0, "skipped": 0, "files": 0}
+              for f in glob.glob(path):
+                  r = ET.parse(f).getroot()
+                  for s in ([r] if r.tag == "testsuite" else r.findall("testsuite")):
+                      total["time"] += float(s.get("time", 0))
+                      for k in ("tests", "failures", "errors", "skipped"):
+                          total[k] += int(s.get(k, 0))
+                  total["files"] += 1
+              return total
+
+          def read(path):
+              try:
+                  return open(path).read()
+              except OSError:
+                  return ""
+
+          lscpu = read("lscpu.txt")
+          model = re.search(r"Model name:\s*(.+)", lscpu)
+          rusage = {}
+          for line in read("time.txt").splitlines():
+              if ":" in line:
+                  k, v = line.rsplit(":", 1)
+                  rusage[k.strip()] = v.strip()
+          perf = {}
+          for line in read("perf.txt").splitlines():
+              parts = line.split(",")
+              if len(parts) >= 3 and parts[2]:
+                  perf[parts[2]] = parts[0]
+          out = {
+              "mode": "${{ matrix.mode }}",
+              "rep": ${{ matrix.rep }},
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "cpu_model": model.group(1).strip() if model else None,
+              "nproc": os.cpu_count(),
+              "exit_code": os.environ.get("EXIT_CODE"),
+              "wall_seconds": float(os.environ.get("WALL_SECONDS", "nan")),
+              "user_seconds": rusage.get("User time (seconds)"),
+              "system_seconds": rusage.get("System time (seconds)"),
+              "max_rss_kb": rusage.get("Maximum resident set size (kbytes)"),
+              "perf": perf,
+              "compatibilityTest": suites("rewrite-java-21/build/test-results/compatibilityTest/*.xml"),
+              "javaTest": suites("rewrite-java-test/build/test-results/test/*.xml"),
+          }
+          json.dump(out, open("result.json", "w"), indent=2)
+          print(json.dumps(out, indent=2))
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.mode }}-${{ matrix.rep }}
+          path: |
+            result.json
+            lscpu.txt
+            time.txt
+            perf.txt
