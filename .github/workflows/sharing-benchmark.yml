@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         mode: ["off", "on"]
-        rep: [1, 2, 3]
+        rep: [1, 2, 3, 4, 5]
     env:
       CODEGENOME_USERNAME: ${{ secrets.CODEGENOME_USERNAME }}
       CODEGENOME_TOKEN: ${{ secrets.CODEGENOME_TOKEN }}
