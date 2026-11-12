@@ -27,6 +27,7 @@ jobs:
         with:
           distribution: temurin
           java-version: |
+            8
             17
             25
             21
